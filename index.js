@@ -32,8 +32,16 @@ const sendMail = (bookingData, email) => {
     from: process.env.NODEMAILER,
     to: email,
     subject: bookingData?.subject,
-    html: `<p>${bookingData?.message}</p>
-    <img src=${bookingData?.image}/>
+    html: `<p>${bookingData?.messages}</p>
+    <p>Price: ${bookingData?.price}</p>
+    <p>TransactionId: ${bookingData?.transactionId}</p>
+    <p>Location: ${bookingData?.home?.location}</p>
+    <p>From: ${bookingData?.home?.from}</p>
+    <p>To: ${bookingData?.home?.to}</p>
+    <p style={margin-bottom: 10px}>Host Email: ${bookingData?.hostEmail}</p>
+    <img src=${bookingData?.home?.image}/>
+
+
     `
   };
 
@@ -46,6 +54,24 @@ const sendMail = (bookingData, email) => {
     }
   });
 
+
+}
+
+function verifyJWT(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) {
+    return res.status(401).send('Unauthorized access')
+  }
+  const token = authHeader.split(' ')[1]
+
+  jwt.verify(token, process.env.ACCESS_TOKEN, function (err, decoded) {
+    if (err) {
+      return res.status(403).send({ message: 'Forbidden Access' })
+    }
+    req.decoded = decoded;
+
+    next()
+  })
 
 }
 
@@ -63,10 +89,11 @@ async function run() {
     const homesCollection = client.db('roombooking').collection('homes');
     const userCollections = client.db('roombooking').collection('users');
     const bookingCollections = client.db('roombooking').collection('bookings');
+    const paymentCollections = client.db('roombooking').collection('payments');
 
 
     //  Save user email and generate JWT
-    app.put('/user/:email', async (req, res) => {
+    app.put('/user/:email', verifyJWT, async (req, res) => {
       const email = req.params.email;
       const user = req.body;
       const filter = { email: email };
@@ -100,33 +127,6 @@ async function run() {
       res.send(users)
     })
 
-    // Booking data post method in database
-    app.post('/bookings', async (req, res) => {
-      const bookingData = req.body;
-      const result = await bookingCollections.insertOne(bookingData);
-      sendMail(
-        {
-          subject: `Booking successful`,
-          message: `Booking id: ${result.insertedId}`,
-          image: `${bookingData?.home?.image}`
-        },
-        bookingData?.guestEmail)
-      res.send(result)
-    })
-
-    // Get Booking data from Database
-    app.get('/bookings', async (req, res) => {
-      let query = {};
-      const email = req.query.email;
-      if (email) {
-        query = {
-          guestEmail: email
-        }
-      }
-      const result = await bookingCollections.find(query).toArray()
-      res.send(result)
-    })
-
     // Services Post 
     app.post('/services', async (req, res) => {
       const service = req.body;
@@ -136,8 +136,8 @@ async function run() {
 
     // Services Post 
     app.get('/services', async (req, res) => {
-      const email = req.params.email;
       const query = {}
+      const email = req.params.email;
       if (email) {
         query = {
           host: {
@@ -154,11 +154,14 @@ async function run() {
     // Update service
     app.put('/service', async (req, res) => {
       const service = req.body;
+      console.log(service)
       const filter = {}
       const options = { upsert: true };
+
       const updateDoc = {
         $set: service
       }
+
       const result = await homesCollection.updateOne(filter, updateDoc, options);
       res.send(result)
 
@@ -174,7 +177,7 @@ async function run() {
     })
 
     // Services Post 
-    app.delete('/services/:id', async (req, res) => {
+    app.delete('/services/:id',  async (req, res) => {
       const id = req.params.id;
       const filter = { _id: ObjectId(id) }
       const result = await homesCollection.deleteOne(filter)
@@ -182,55 +185,71 @@ async function run() {
       res.send(result)
     })
 
+    // Serach Result
+    app.get('/serach-result', async (req, res) => {
+      const query = {}
+      const location = req.query.location;
+      if (location) {
+        query.location = location
+      } else {
+        res.send({ message: `No result found` })
+      };
+
+
+      const cursor = homesCollection.find(query)
+      const result = await cursor.toArray()
+      res.send(result)
+
+    })
+
+    // Booking data post method in database
+    app.post('/bookings', async (req, res) => {
+      const bookingData = req.body;
+      const result = await bookingCollections.insertOne(bookingData);
+      sendMail(
+        {
+          subject: `Booking successful`,
+          messages: `Booking id: ${result.insertedId}`,
+          ...bookingData
+        },
+        bookingData?.guestEmail)
+
+      res.send({ transactionId: bookingData.transactionId })
+      console.log(result)
+    })
+
+    // Get Booking data from Database
+    app.get('/bookings', async (req, res) => {
+      let query = {};
+      const email = req.query.email;
+      if (email) {
+        query = {
+          guestEmail: email
+        }
+      }
+      const result = await bookingCollections.find(query).toArray()
+      res.send(result)
+    })
+
+
 
     // Payment 
-  app.post('/create-payment', async (req, res) => {
+    app.post('/create-payment', async (req, res) => {
       const price = req.body.price;
       const amount = parseFloat(price * 100);
 
       const paymentIntent = await stripe.paymentIntents.create({
-          amount: amount,
-          currency: 'usd',
-          payment_method_types: [
-              "card"
-          ],
+        amount: amount,
+        currency: 'usd',
+        payment_method_types: [
+          "card"
+        ],
       })
 
       res.send({
-          clientSecret: paymentIntent.client_secret,
+        clientSecret: paymentIntent.client_secret,
       });
-  })
-
-
-  app.post('/payments', async (req, res) => {
-      const payment = req.body;
-      console.log(payment)
-      const result = await paymentsCollection.insertOne(payment);
-
-      const id = payment.orderId;
-      const filter = { _id: ObjectId(id) };
-      const updatedDoc = {
-          $set: {
-              paid: true,
-              transactionId: payment.transactionId,
-          }
-      }
-
-      const updatedResult = await ordersCollection.updateOne(filter, updatedDoc)
-      console.log(updatedResult)
-      res.send(result)
-  })
-
-
-
-
-
-
-
-
-
-
-
+    })
 
 
 
